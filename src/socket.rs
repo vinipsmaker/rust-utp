@@ -278,7 +278,7 @@ impl UtpSocket {
 
         let shallow_clone = packet.shallow_clone();
 
-        if packet.get_type() == PacketType::Data && self.ack_nr + 1 <= packet.seq_nr() {
+        if packet.get_type() == PacketType::Data && packet.seq_nr().wrapping_sub(self.ack_nr) >= 1 {
             self.insert_into_buffer(packet);
         }
 
@@ -405,7 +405,11 @@ impl UtpSocket {
             packet.set_connection_id(self.sender_connection_id);
 
             self.unsent_queue.push_back(packet);
-            self.seq_nr += 1;
+            if self.seq_nr == ::std::u16::MAX {
+                self.seq_nr = 0;
+            } else {
+                self.seq_nr += 1;
+            }
         }
 
         // Flush unsent packet queue
@@ -586,7 +590,7 @@ impl UtpSocket {
         debug!("({:?}, {:?})", self.state, packet.get_type());
 
         // Acknowledge only if the packet strictly follows the previous one
-        if packet.seq_nr() == self.ack_nr + 1 {
+        if packet.seq_nr().wrapping_sub(self.ack_nr) == 1 {
             self.ack_nr = packet.seq_nr();
         }
 
@@ -669,7 +673,7 @@ impl UtpSocket {
     fn handle_data_packet(&mut self, packet: &Packet) -> Option<Packet> {
         let mut reply = self.prepare_reply(packet, PacketType::State);
 
-        if self.ack_nr + 1 < packet.seq_nr() {
+        if packet.seq_nr().wrapping_sub(self.ack_nr) > 1 {
             debug!("current ack_nr ({}) is behind received packet seq_nr ({})",
                    self.ack_nr, packet.seq_nr());
 
@@ -697,14 +701,24 @@ impl UtpSocket {
     }
 
     fn update_congestion_window(&mut self, off_target: f64, bytes_newly_acked: u32) {
-        let flightsize = self.curr_window;
-        self.cwnd += (GAIN * off_target * bytes_newly_acked as f64 * MSS as f64 / self.cwnd as f64) as u32;
-        let max_allowed_cwnd = flightsize + ALLOWED_INCREASE * MSS;
-        self.cwnd = min(self.cwnd, max_allowed_cwnd);
-        self.cwnd = max(self.cwnd, MIN_CWND * MSS);
+        use std::num::Int;
 
-        debug!("cwnd: {}", self.cwnd);
-        debug!("max_allowed_cwnd: {}", max_allowed_cwnd);
+        let flightsize = self.curr_window;
+        match self.cwnd.checked_add((GAIN * off_target * bytes_newly_acked as f64 * MSS as f64 / self.cwnd as f64) as u32) {
+            Some(_) => {
+                let max_allowed_cwnd = flightsize + ALLOWED_INCREASE * MSS;
+                self.cwnd = min(self.cwnd, max_allowed_cwnd);
+                self.cwnd = max(self.cwnd, MIN_CWND * MSS);
+
+                debug!("cwnd: {}", self.cwnd);
+                debug!("max_allowed_cwnd: {}", max_allowed_cwnd);
+            }
+            None => {
+                // FIXME: This shouldn't happen at all, more investigation is needed to ascertain the
+                // true cause of the miscalculation of the congestion window increase. For now, we
+                // simply ignore meaningly large increases.
+            }
+        }
     }
 
     fn handle_state_packet(&mut self, packet: &Packet) {
@@ -823,7 +837,7 @@ mod test {
     use std::old_io::test::next_test_ip4;
     use std::old_io::{EndOfFile, Closed};
     use std::old_io::net::udp::UdpSocket;
-    use std::thread::Thread;
+    use std::thread;
     use super::{UtpSocket, SocketState, BUF_SIZE};
     use packet::{Packet, PacketType};
     use util::now_microseconds;
@@ -842,7 +856,7 @@ mod test {
         // Check proper difference in client's send connection id and receive connection id
         assert_eq!(client.sender_connection_id, client.receiver_connection_id + 1);
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let client = iotry!(client.connect(server_addr));
             assert!(client.state == SocketState::Connected);
             assert_eq!(client.connected_to, server_addr);
@@ -871,7 +885,7 @@ mod test {
         assert!(server.state == SocketState::New);
         assert!(client.state == SocketState::New);
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = iotry!(client.connect(server_addr));
             assert!(client.state == SocketState::Connected);
             assert_eq!(client.close(), Ok(()));
@@ -918,7 +932,7 @@ mod test {
         assert!(server.state == SocketState::New);
         assert!(client.state == SocketState::New);
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let client = iotry!(client.connect(server_addr));
             assert!(client.state == SocketState::Connected);
             let mut buf = [0u8; BUF_SIZE];
@@ -953,7 +967,7 @@ mod test {
         let client = iotry!(UtpSocket::bind(client_addr));
         let server = iotry!(UtpSocket::bind(server_addr));
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             // Make the server listen for incoming connections
             let mut server = server;
             let mut buf = [0u8; BUF_SIZE];
@@ -1143,7 +1157,7 @@ mod test {
         assert!(response.unwrap().get_type() == PacketType::State);
 
         // Now, disrupt connection with a packet with an incorrect connection id
-        let new_connection_id = initial_connection_id * 2;
+        let new_connection_id = initial_connection_id.wrapping_mul(2);
 
         let mut packet = Packet::new();
         packet.set_wnd_size(BUF_SIZE as u32);
@@ -1231,7 +1245,7 @@ mod test {
         // Check proper difference in client's send connection id and receive connection id
         assert_eq!(client.sender_connection_id, client.receiver_connection_id + 1);
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = iotry!(client.connect(server_addr));
             assert!(client.state == SocketState::Connected);
             let mut s = client.socket;
@@ -1305,7 +1319,7 @@ mod test {
         let test_syn_pkt = Packet::decode(&test_syn_raw);
         let seq_nr = test_syn_pkt.seq_nr();
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = client;
             iotry!(client.send_to(&test_syn_raw, server_addr));
             client.set_timeout(Some(10));
@@ -1338,7 +1352,7 @@ mod test {
         let d = data.clone();
         assert_eq!(LEN, data.len());
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = iotry!(client.connect(server_addr));
             iotry!(client.send_to(d.as_slice()));
             iotry!(client.close());
@@ -1411,7 +1425,7 @@ mod test {
         // Check proper difference in client's send connection id and receive connection id
         assert_eq!(client.sender_connection_id, client.receiver_connection_id + 1);
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = iotry!(client.connect(server_addr));
             assert!(client.state == SocketState::Connected);
             assert_eq!(client.connected_to, server_addr);
@@ -1501,7 +1515,7 @@ mod test {
         // Check proper difference in client's send connection id and receive connection id
         assert_eq!(client.sender_connection_id, client.receiver_connection_id + 1);
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = iotry!(client.connect(server_addr));
             assert!(client.state == SocketState::Connected);
             let mut s = client.socket.clone();
@@ -1560,7 +1574,7 @@ mod test {
         let to_send = data.clone();
 
         // Client
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let client = iotry!(UtpSocket::bind(client_addr));
             let mut client = iotry!(client.connect(server_addr));
             client.congestion_timeout = 50;
@@ -1618,7 +1632,7 @@ mod test {
         let data = (0..LEN).map(|idx| idx as u8).collect::<Vec<u8>>();
         let to_send = data.clone();
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = iotry!(client.connect(server_addr));
 
             // Send everything except the odd chunks
@@ -1637,6 +1651,7 @@ mod test {
                     iotry!(client.socket.send_to(packet.bytes().as_slice(), dst));
                 }
 
+                client.curr_window += packet.len() as u32;
                 client.send_window.push(packet);
                 client.seq_nr += 1;
             }
@@ -1665,7 +1680,7 @@ mod test {
         let data = (0..LEN).map(|idx| idx as u8).collect::<Vec<u8>>();
         let to_send = data.clone();
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let client = iotry!(UtpSocket::bind(client_addr));
             let mut client = iotry!(client.connect(server_addr));
             iotry!(client.send_to(to_send.as_slice()));
@@ -1697,7 +1712,7 @@ mod test {
         let data = (0..LEN).map(|idx| idx as u8).collect::<Vec<u8>>();
         let to_send = data.clone();
 
-        Thread::spawn(move || {
+        thread::spawn(move || {
             let mut client = iotry!(UtpSocket::bind(client_addr));
 
             // Advance socket's sequence number
