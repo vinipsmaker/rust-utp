@@ -13,15 +13,15 @@ keywords = ["utp", "networking", "protocol", "transport"]
 
 [dependencies]
 time = "*"
-log = "0.2"
-rand = "0.1"
+log = "0.3"
+rand = "0.2"
 
 [lib]
 name = "utp"
 bench = false
 
 [[bin]]
-name = "utp-cat"
-path = "examples/utp-cat/main.rs"
+name = "utpcat"
+path = "examples/utpcat/main.rs"
 test = false
 bench = false
