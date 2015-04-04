@@ -1,5 +1,3 @@
-#![feature(old_io)]
-
 extern crate utp;
 
 use std::thread;
@@ -10,8 +8,14 @@ macro_rules! iotry {
     ($e:expr) => (match $e { Ok(e) => e, Err(e) => panic!("{}", e) })
 }
 
+fn next_test_port() -> u16 {
+    use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+    static NEXT_OFFSET: AtomicUsize = ATOMIC_USIZE_INIT;
+    const BASE_PORT: u16 = 9600;
+    BASE_PORT + NEXT_OFFSET.fetch_add(1, Ordering::Relaxed) as u16
+}
+
 fn next_test_ip4<'a>() -> (&'a str, u16) {
-    use std::old_io::test::next_test_port;
     ("127.0.0.1", next_test_port())
 }
 
@@ -48,7 +52,7 @@ fn test_stream_small_data() {
         iotry!(client.close());
     });
 
-    let mut received = vec!();
+    let mut received = Vec::with_capacity(LEN);
     iotry!(server.read_to_end(&mut received));
     assert!(!received.is_empty());
     assert_eq!(received.len(), data.len());
@@ -72,7 +76,7 @@ fn test_stream_large_data() {
         iotry!(client.close());
     });
 
-    let mut received = vec!();
+    let mut received = Vec::with_capacity(LEN);
     iotry!(server.read_to_end(&mut received));
     assert!(!received.is_empty());
     assert_eq!(received.len(), data.len());
@@ -95,11 +99,13 @@ fn test_stream_successive_reads() {
         iotry!(client.close());
     });
 
-    let mut received = vec!();
+    let mut received = Vec::with_capacity(LEN);
     iotry!(server.read_to_end(&mut received));
+    assert!(!received.is_empty());
+    assert_eq!(received.len(), data.len());
+    assert_eq!(received, data);
 
-    let mut buf = [0u8; 4096];
-    match server.read(&mut buf) {
+    match server.read(&mut received) {
         Ok(0) => (),
         e => panic!("should have returned Ok(0), got {:?}", e),
     };

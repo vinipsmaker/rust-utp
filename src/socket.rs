@@ -2,8 +2,7 @@ use std::cmp::{min, max};
 use std::collections::{LinkedList, VecDeque};
 use std::net::{ToSocketAddrs, SocketAddr, UdpSocket};
 use std::io::{Result, Error, ErrorKind};
-use std::iter::{range_inclusive, repeat};
-use std::num::SignedInt;
+use std::iter::repeat;
 use util::{now_microseconds, ewma};
 use packet::{Packet, PacketType, ExtensionType, HEADER_SIZE};
 use rand;
@@ -26,7 +25,7 @@ macro_rules! iotry {
     ($e:expr) => (match $e { Ok(e) => e, Err(e) => panic!("{}", e) })
 }
 
-#[derive(PartialEq,Eq,Debug,Copy)]
+#[derive(PartialEq,Eq,Debug,Copy,Clone)]
 enum SocketState {
     New,
     Connected,
@@ -181,8 +180,7 @@ impl UtpSocket {
         let packet = Packet::decode(&buf[..len]);
         if packet.get_type() != PacketType::State {
             return Err(Error::new(ErrorKind::ConnectionAborted,
-                                  "The remote peer sent an invalid reply",
-                                  None));
+                                  "The remote peer sent an invalid reply"));
         }
         try!(self.handle_packet(&packet, addr));
 
@@ -234,22 +232,21 @@ impl UtpSocket {
     /// inflight packets are consumed.
     #[unstable]
     pub fn recv_from(&mut self, buf: &mut[u8]) -> Result<(usize,SocketAddr)> {
-        // Return Ok(0) -- end of file
-        if self.state == SocketState::Closed {
-            return Ok((0, self.connected_to));
-        }
-
-        if self.state == SocketState::ResetReceived {
-            return Err(Error::new(ErrorKind::ConnectionReset,
-                                  "Connection reset by remote peer",
-                                  None));
-        }
-
         let read = self.flush_incoming_buffer(buf);
 
         if read > 0 {
             return Ok((read, self.connected_to));
         } else {
+            // Return Ok(0) -- end of file
+            if self.state == SocketState::Closed {
+                return Ok((0, self.connected_to));
+            }
+
+            if self.state == SocketState::ResetReceived {
+                return Err(Error::new(ErrorKind::ConnectionReset,
+                                      "Connection reset by remote peer"));
+            }
+
             loop {
                 if self.state == SocketState::Closed {
                     return Ok((0, self.connected_to));
@@ -336,52 +333,48 @@ impl UtpSocket {
     /// slice `buf`, starting in position `start`.
     /// Returns the last written index.
     fn flush_incoming_buffer(&mut self, buf: &mut [u8]) -> usize {
-        let mut idx = 0;
-
-        // Check if there is any pending data from a partially flushed packet
+        // Return pending data from a partially read packet
         if !self.pending_data.is_empty() {
-            let len = buf.clone_from_slice(&self.pending_data[..]);
+            let max_len = min(buf.len(), self.pending_data.len());
+            unsafe {
+                use std::ptr::copy;
+                copy(self.pending_data.as_ptr(), buf.as_mut_ptr(), max_len);
+            }
+            let flushed = max_len;
 
-            // If all the data in the pending data buffer fits the given output
-            // buffer, remove the corresponding packet from the incoming buffer
-            // and clear the pending data buffer
-            if len == self.pending_data.len() {
+            if flushed == self.pending_data.len() {
                 self.pending_data.clear();
                 self.advance_incoming_buffer();
-                return idx + len;
             } else {
-                // Remove the bytes copied to the output buffer from the pending
-                // data buffer (i.e., pending -= output)
-                self.pending_data = self.pending_data[len..].to_vec();
+                self.pending_data = self.pending_data[flushed..].to_vec();
             }
+
+            return flushed;
         }
 
-        // Copy the payload of as many packets in the incoming buffer as possible
-        while !self.incoming_buffer.is_empty() &&
+        if !self.incoming_buffer.is_empty() &&
             (self.ack_nr == self.incoming_buffer[0].seq_nr() ||
              self.ack_nr + 1 == self.incoming_buffer[0].seq_nr())
         {
-            let len = min(buf.len() - idx, self.incoming_buffer[0].payload.len());
-
-            for i in (0..len) {
-                buf[idx] = self.incoming_buffer[0].payload[i];
-                idx += 1;
+            let max_len = min(buf.len(), self.incoming_buffer[0].payload.len());
+            unsafe {
+                use std::ptr::copy;
+                copy(self.incoming_buffer[0].payload.as_ptr(),
+                     buf.as_mut_ptr(),
+                     max_len);
             }
+            let flushed = max_len;
 
-            // Remove top packet if its payload fits the output buffer
-            if self.incoming_buffer[0].payload.len() == len {
+            if flushed == self.incoming_buffer[0].payload.len() {
                 self.advance_incoming_buffer();
             } else {
-                self.pending_data.push_all(&self.incoming_buffer[0].payload[len..]);
+                self.pending_data = self.incoming_buffer[0].payload[flushed..].to_vec();
             }
 
-            // Stop if the output buffer is full
-            if buf.len() == idx {
-                return idx;
-            }
+            return flushed;
         }
 
-        return idx;
+        return 0;
     }
 
     /// Send data on socket to the remote peer. Returns nothing on success.
@@ -398,8 +391,7 @@ impl UtpSocket {
     pub fn send_to(&mut self, buf: &[u8]) -> Result<usize> {
         if self.state == SocketState::Closed {
             return Err(Error::new(ErrorKind::NotConnected,
-                                  "The socket is closed",
-                                  None));
+                                  "The socket is closed"));
         }
 
         let total_length = buf.len();
@@ -455,8 +447,7 @@ impl UtpSocket {
     }
 
     fn update_base_delay(&mut self, v: i64, now: i64) {
-        use std::num::Int;
-        let minute_in_microseconds = 60 * 10.pow(6);
+        let minute_in_microseconds = 60 * 10i64.pow(6);
 
         if self.base_delays.is_empty() || now - self.base_delays[0].received_at > minute_in_microseconds {
             // Drop the oldest sample and save minimum for current minute
@@ -511,8 +502,8 @@ impl UtpSocket {
 
     /// Calculate the lowest base delay in the current window.
     fn min_base_delay(&self) -> i64 {
-        match self.base_delays.iter().min_by(|&x| (x.received_at - x.sent_at).abs()) {
-            Some(ref x) => x.received_at - x.sent_at,
+        match self.base_delays.iter().map(|ref x| x.received_at - x.sent_at).min() {
+            Some(x) => x,
             None => 0
         }
     }
@@ -562,7 +553,7 @@ impl UtpSocket {
         if let Some(position) = self.send_window.iter()
             .position(|pkt| pkt.seq_nr() == self.last_acked)
         {
-            for _ in range_inclusive(0, position) {
+            for _ in (0..position + 1) {
                 let packet = self.send_window.remove(0);
                 self.curr_window -= packet.len() as u32;
             }
@@ -612,8 +603,7 @@ impl UtpSocket {
             },
             (SocketState::SynSent, _) => {
                 Err(Error::new(ErrorKind::ConnectionRefused,
-                               "The remote peer sent an invalid reply",
-                               None))
+                               "The remote peer sent an invalid reply"))
             }
             (SocketState::Connected, PacketType::Syn) => Ok(None), // ignore
             (SocketState::Connected, PacketType::Data) => {
@@ -628,7 +618,7 @@ impl UtpSocket {
                 self.fin_seq_nr = packet.seq_nr();
 
                 // If all packets are received and handled
-                if self.no_pending_data() && self.ack_nr == self.fin_seq_nr
+                if self.ack_nr == self.fin_seq_nr
                 {
                     self.state = SocketState::Closed;
                     Ok(Some(self.prepare_reply(packet, PacketType::State)))
@@ -646,8 +636,7 @@ impl UtpSocket {
             (_, PacketType::Reset) => {
                 self.state = SocketState::ResetReceived;
                 Err(Error::new(ErrorKind::ConnectionReset,
-                               "Remote host aborted connection (incorrect connection id)",
-                               None))
+                               "Remote host aborted connection (incorrect connection id)"))
             },
             (state, ty) => panic!("Unimplemented handling for ({:?},{:?})", state, ty)
         }
@@ -684,8 +673,6 @@ impl UtpSocket {
     }
 
     fn update_congestion_window(&mut self, off_target: f64, bytes_newly_acked: u32) {
-        use std::num::Int;
-
         let flightsize = self.curr_window;
         match self.cwnd.checked_add((GAIN * off_target * bytes_newly_acked as f64 * MSS as f64 / self.cwnd as f64) as u32) {
             Some(_) => {
@@ -808,16 +795,10 @@ impl UtpSocket {
         }
         self.incoming_buffer.insert(i, packet);
     }
-
-    /// Checks whether there is pending data (to be returned on a `recv_from` call) on the socket
-    fn no_pending_data(&self) -> bool {
-        self.pending_data.is_empty() && self.incoming_buffer.is_empty()
-    }
 }
 
 #[cfg(test)]
 mod test {
-    use std::net::UdpSocket;
     use std::thread;
     use std::net::ToSocketAddrs;
     use std::io::ErrorKind;
@@ -826,8 +807,14 @@ mod test {
     use util::now_microseconds;
     use rand;
 
+    fn next_test_port() -> u16 {
+        use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+        static NEXT_OFFSET: AtomicUsize = ATOMIC_USIZE_INIT;
+        const BASE_PORT: u16 = 9600;
+        BASE_PORT + NEXT_OFFSET.fetch_add(1, Ordering::Relaxed) as u16
+    }
+
     fn next_test_ip4<'a>() -> (&'a str, u16) {
-        use std::old_io::test::next_test_port;
         ("127.0.0.1", next_test_port())
     }
 
@@ -879,7 +866,7 @@ mod test {
         thread::spawn(move || {
             let mut client = iotry!(client.connect(server_addr));
             assert!(client.state == SocketState::Connected);
-            assert_eq!(client.close(), Ok(()));
+            assert!(client.close().is_ok());
         });
 
         // Make the server listen for incoming connections until the end of the input
@@ -953,7 +940,7 @@ mod test {
         let ack_nr = client.ack_nr;
         assert!(ack_nr != 0);
         assert!(ack_nr == sender_seq_nr);
-        assert_eq!(client.close(), Ok(()));
+        assert!(client.close().is_ok());
 
         // The reply to both connect (SYN) and close (FIN) should be
         // STATE packets, which don't increase the sequence number
@@ -1259,22 +1246,19 @@ mod test {
         let mut buf = [0; BUF_SIZE];
         let expected: Vec<u8> = (1..13u8).collect();
         let mut received: Vec<u8> = vec!();
-        match server.recv_from(&mut buf) {
-            Ok((len, _src)) => received.push_all(&buf[..len]),
-            Err(e) => panic!("{:?}", e)
+        loop {
+            match server.recv_from(&mut buf) {
+                Ok((0, _src)) => break,
+                Ok((len, _src)) => received.extend(buf[..len].to_vec()),
+                Err(e) => panic!("{:?}", e)
+            }
         }
 
         // After establishing a new connection, the server's ids are a mirror of the client's.
         assert_eq!(server.receiver_connection_id, server.sender_connection_id + 1);
-        assert_eq!(server.state, SocketState::Connected);
+        assert_eq!(server.state, SocketState::Closed);
         assert_eq!(received.len(), expected.len());
         assert_eq!(received, expected);
-
-        match server.recv_from(&mut buf) {
-            Ok((0, _src)) => (),
-            e => panic!("Expected Ok(0), got {:?}", e)
-        }
-        assert_eq!(server.state, SocketState::Closed);
     }
 
     #[test]
@@ -1497,7 +1481,7 @@ mod test {
         loop {
             match server.recv_from(&mut buf) {
                 Ok((0, _src)) => break,
-                Ok((len, _src)) => received.push_all(&buf[..len]),
+                Ok((len, _src)) => received.extend(buf[..len].to_vec()),
                 Err(e) => panic!("{:?}", e)
             }
         }
@@ -1553,7 +1537,7 @@ mod test {
         loop {
             match server.recv_from(&mut buf) {
                 Ok((0, _src)) => break,
-                Ok((len, _src)) => received.push_all(&buf[..len]),
+                Ok((len, _src)) => received.extend(buf[..len].to_vec()),
                 Err(e) => panic!("{:?}", e)
             }
         }
@@ -1604,7 +1588,7 @@ mod test {
         loop {
             match server.recv_from(&mut buf) {
                 Ok((0, _src)) => break,
-                Ok((len, _src)) => received.push_all(&buf[..len]),
+                Ok((len, _src)) => received.extend(buf[..len].to_vec()),
                 Err(e) => panic!("{}", e)
             }
         }
@@ -1632,7 +1616,7 @@ mod test {
             let mut small_buffer = [0; 512];
             match server.recv_from(&mut small_buffer) {
                 Ok((0, _src)) => break,
-                Ok((len, _src)) => read.push_all(&small_buffer[..len]),
+                Ok((len, _src)) => read.extend(small_buffer[..len].to_vec()),
                 Err(e) => panic!("{}", e),
             }
         }
@@ -1671,7 +1655,7 @@ mod test {
         loop {
             match server.recv_from(&mut buf) {
                 Ok((0, _src)) => break,
-                Ok((len, _src)) => received.push_all(&buf[..len]),
+                Ok((len, _src)) => received.extend(buf[..len].to_vec()),
                 Err(e) => panic!("{}", e)
             }
         }
