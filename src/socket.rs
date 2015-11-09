@@ -2728,6 +2728,106 @@ mod test {
         assert!(child.join().is_ok());
     }
 
+    //fn exchange(socket: &mut UtpSocket, tx_buffer: &[u8; 10]) -> Result<()> {
+    //}
+
+    #[test]
+    fn test_network() {
+        use std::net::SocketAddr;
+        use std::thread::{JoinHandle, spawn};
+
+        static NODE_COUNT: usize = 64;
+        static MSG_COUNT: usize = 4;
+        static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
+
+        struct Node {
+            listener: UtpListener,
+        }
+
+        impl Node {
+            fn new() -> Node {
+                Node {
+                    listener: iotry!(UtpListener::bind("127.0.0.1:0")),
+                }
+            }
+
+            fn run(&mut self, peer_addrs: Vec<SocketAddr>) {
+                let connect_join_handle = spawn(move || {
+                    let mut send_jhs = Vec::<JoinHandle<()>>::new();
+
+                    for peer_addr in peer_addrs {
+                        let mut socket = iotry!(UtpSocket::connect(peer_addr));
+                        send_jhs.push(spawn(move || {
+                            for _ in 0..MSG_COUNT {
+                                assert_eq!(iotry!(socket.send_to(&TX_BUF)), TX_BUF.len());
+                                let mut buf = [0; 10];
+                                iotry!(socket.recv_from(&mut buf));
+                                assert_eq!(buf, TX_BUF);
+                            }
+                        }));
+                    }
+
+                    for jh in send_jhs {
+                        iotry!(jh.join());
+                    }
+                });
+
+                let mut recv_jhs = Vec::<JoinHandle<()>>::new();
+
+                for _ in 0..NODE_COUNT-1 {
+                    let mut socket = iotry!(self.listener.accept()).0;
+
+                    recv_jhs.push(spawn(move || {
+                        for _ in 0..MSG_COUNT {
+                            assert_eq!(iotry!(socket.send_to(&TX_BUF)), TX_BUF.len());
+                            let mut buf = [0; 10];
+                            iotry!(socket.recv_from(&mut buf));
+                            assert_eq!(buf, TX_BUF);
+                        }
+                    }));
+                }
+
+                for jh in recv_jhs {
+                    iotry!(jh.join());
+                }
+
+                iotry!(connect_join_handle.join());
+            }
+        }
+
+        let mut nodes = Vec::<Node>::new();
+
+        for _ in 0..NODE_COUNT {
+            nodes.push(Node::new());
+        }
+
+        let listening_addrs = nodes.iter()
+                              .map(|n|iotry!(n.listener.local_addr()))
+                              .collect::<Vec<_>>();
+
+        let mut join_handles = Vec::<JoinHandle<()>>::new();
+
+        let mut ni: usize = 0;
+        for mut node in nodes {
+            let mut addrs = Vec::<SocketAddr>::new();
+
+            for ai in 0..listening_addrs.len() {
+                if ai == ni { continue }
+                addrs.push(listening_addrs[ai].clone());
+            }
+
+            join_handles.push(::std::thread::spawn(move || {
+                node.run(addrs);
+            }));
+
+            ni += 1;
+        }
+
+        for handle in join_handles {
+            iotry!(handle.join());
+        }
+    }
+
     // Test data exchange
     #[test]
     fn test_data_exchange_utp() {
