@@ -2733,7 +2733,7 @@ mod test {
         use std::net::SocketAddr;
         use std::thread::{JoinHandle, spawn};
 
-        static NODE_COUNT: usize = 20;
+        static NODE_COUNT: usize = 50;
         static MSG_COUNT: usize = 5;
         static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
 
@@ -2753,9 +2753,16 @@ mod test {
                 while i < MSG_COUNT {
                     assert_eq!(iotry!(socket.send_to(&TX_BUF)), TX_BUF.len());
                     let mut buf = [0; 10];
-                    let (cnt, _) = iotry!(socket.recv_from(&mut buf));
-                    // TODO: Why is this sometimes 0?
-                    if cnt == 0 { continue; }
+                    let cnt = match socket.recv_from(&mut buf) {
+                        Ok((cnt, _)) => cnt,
+                        Err(ref err) if err.kind() == ErrorKind::NotConnected && i == MSG_COUNT - 1 => {
+                            // This is OK as it can happen on a congested network.
+                            break;
+                        },
+                        Err(err) => {
+                            panic!("Recv error {:?}", err);
+                        }
+                    };
                     assert_eq!(cnt, 10);
                     assert_eq!(buf, TX_BUF);
                     i += 1;
@@ -2827,7 +2834,7 @@ mod test {
         use std::net::SocketAddr;
         use std::thread::{JoinHandle, spawn};
 
-        static NODE_COUNT: usize = 20;
+        static NODE_COUNT: usize = 40;
         static MSG_COUNT: usize = 5;
         static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
 
@@ -2873,8 +2880,11 @@ mod test {
                             },
                             Err(ref e) if e.kind() == ErrorKind::TimedOut => {
                             },
+                            Err(ref e) if e.kind() == ErrorKind::NotConnected && send_cnt == MSG_COUNT=> {
+                                break;
+                            },
                             Err(e) => {
-                                panic!("{:?}", e);
+                                panic!("{:?} recv_cnt={} send_cnt={}", e, recv_cnt, send_cnt);
                             }
                         }
                     }
