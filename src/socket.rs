@@ -2728,14 +2728,14 @@ mod test {
         assert!(child.join().is_ok());
     }
 
-    #[test]
-    fn test_network_no_timeout() {
+    const NETWORK_NODE_COUNT: usize = 40;
+    const NETWORK_MSG_COUNT: usize = 5;
+
+    fn test_network(exchange: fn(&mut UtpSocket) -> ()) {
         use std::net::SocketAddr;
         use std::thread::{JoinHandle, spawn};
 
-        static NODE_COUNT: usize = 50;
-        static MSG_COUNT: usize = 5;
-        static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
+        const NODE_COUNT: usize = NETWORK_NODE_COUNT;
 
         struct Node {
             listener: UtpListener,
@@ -2748,34 +2748,13 @@ mod test {
                 }
             }
 
-            fn exchange(socket: &mut UtpSocket) {
-                let mut i = 0;
-                while i < MSG_COUNT {
-                    assert_eq!(iotry!(socket.send_to(&TX_BUF)), TX_BUF.len());
-                    let mut buf = [0; 10];
-                    let cnt = match socket.recv_from(&mut buf) {
-                        Ok((cnt, _)) => cnt,
-                        Err(ref err) if err.kind() == ErrorKind::NotConnected && i == MSG_COUNT - 1 => {
-                            // This is OK as it can happen on a congested network.
-                            break;
-                        },
-                        Err(err) => {
-                            panic!("Recv error {:?}", err);
-                        }
-                    };
-                    assert_eq!(cnt, 10);
-                    assert_eq!(buf, TX_BUF);
-                    i += 1;
-                }
-            }
-
-            fn run(&mut self, peer_addrs: Vec<SocketAddr>) {
+            fn run(&mut self, exchange: fn(&mut UtpSocket) -> (), peer_addrs: Vec<SocketAddr>) {
                 let connect_join_handle = spawn(move || {
                     let mut send_jhs = Vec::<JoinHandle<()>>::new();
 
                     for peer_addr in peer_addrs {
                         let mut socket = iotry!(UtpSocket::connect(peer_addr));
-                        send_jhs.push(spawn(move || { Node::exchange(&mut socket) }));
+                        send_jhs.push(spawn(move || { exchange(&mut socket) }));
                     }
 
                     for jh in send_jhs {
@@ -2787,7 +2766,7 @@ mod test {
 
                 for _ in 0..NODE_COUNT-1 {
                     let mut socket = iotry!(self.listener.accept()).0;
-                    recv_jhs.push(spawn(move || { Node::exchange(&mut socket) }));
+                    recv_jhs.push(spawn(move || { exchange(&mut socket) }));
                 }
 
                 for jh in recv_jhs {
@@ -2819,7 +2798,7 @@ mod test {
                 addrs.push(listening_addrs[ai].clone());
             }
 
-            join_handles.push(spawn(move || { node.run(addrs); }));
+            join_handles.push(spawn(move || { node.run(exchange, addrs); }));
 
             ni += 1;
         }
@@ -2830,128 +2809,85 @@ mod test {
     }
 
     #[test]
-    fn test_network_with_timeout() {
-        use std::net::SocketAddr;
-        use std::thread::{JoinHandle, spawn};
-
-        static NODE_COUNT: usize = 40;
-        static MSG_COUNT: usize = 5;
+    fn test_network_no_timeout() {
+        static MSG_COUNT: usize  = NETWORK_MSG_COUNT;
         static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
 
-        struct Node {
-            listener: UtpListener,
-        }
-
-        impl Node {
-            fn new() -> Node {
-                Node {
-                    listener: iotry!(UtpListener::bind("127.0.0.1:0")),
-                }
-            }
-
-            fn exchange(socket: &mut UtpSocket) {
-                socket.set_read_timeout(Some(50));
-                let mut recv_cnt = 0;
-                let mut send_cnt = 0;
-                loop {
-                    if send_cnt < MSG_COUNT {
-                        match socket.send_to(&TX_BUF) {
-                            Ok(cnt) => {
-                                assert_eq!(cnt, TX_BUF.len());
-                                send_cnt += 1;
-                            },
-                            Err(ref e) if e.kind() == ErrorKind::TimedOut => {
-                            },
-                            Err(e) => {
-                                panic!("{:?}", e);
-                            }
-                        }
-                    }
-                    if recv_cnt < MSG_COUNT {
-                        let mut buf = [0; 10];
-                        match socket.recv_from(&mut buf) {
-                            Ok((cnt, _)) => {
-                                // TODO: We should never receive message of size zero
-                                // in this test.
-                                if cnt == 0 { continue; }
-                                assert_eq!(cnt, TX_BUF.len());
-                                assert_eq!(buf, TX_BUF);
-                                recv_cnt += 1;
-                            },
-                            Err(ref e) if e.kind() == ErrorKind::TimedOut => {
-                            },
-                            Err(ref e) if e.kind() == ErrorKind::NotConnected && send_cnt == MSG_COUNT=> {
-                                break;
-                            },
-                            Err(e) => {
-                                panic!("{:?} recv_cnt={} send_cnt={}", e, recv_cnt, send_cnt);
-                            }
-                        }
-                    }
-                    if send_cnt == MSG_COUNT && recv_cnt == MSG_COUNT {
+        fn sequential_exchange(socket: &mut UtpSocket) {
+            let mut i = 0;
+            while i < MSG_COUNT {
+                assert_eq!(iotry!(socket.send_to(&TX_BUF)), TX_BUF.len());
+                let mut buf = [0; 10];
+                let cnt = match socket.recv_from(&mut buf) {
+                    Ok((cnt, _)) => cnt,
+                    Err(ref err) if err.kind() == ErrorKind::NotConnected && i == MSG_COUNT - 1 => {
+                        // This is OK as it can happen on a congested network.
                         break;
+                    },
+                    Err(err) => {
+                        panic!("Recv error {:?}", err);
                     }
-                }
-            }
-
-            fn run(&mut self, peer_addrs: Vec<SocketAddr>) {
-                let connect_join_handle = spawn(move || {
-                    let mut send_jhs = Vec::<JoinHandle<()>>::new();
-
-                    for peer_addr in peer_addrs {
-                        let mut socket = iotry!(UtpSocket::connect(peer_addr));
-                        send_jhs.push(spawn(move || Node::exchange(&mut socket)));
-                    }
-
-                    for jh in send_jhs {
-                        iotry!(jh.join());
-                    }
-                });
-
-                let mut recv_jhs = Vec::<JoinHandle<()>>::new();
-
-                for _ in 0..NODE_COUNT-1 {
-                    let mut socket = iotry!(self.listener.accept()).0;
-                    recv_jhs.push(spawn(move || Node::exchange(&mut socket)));
-                }
-
-                for jh in recv_jhs {
-                    iotry!(jh.join());
-                }
-
-                iotry!(connect_join_handle.join());
+                };
+                assert_eq!(cnt, 10);
+                assert_eq!(buf, TX_BUF);
+                i += 1;
             }
         }
 
-        let mut nodes = Vec::<Node>::new();
+        test_network(sequential_exchange);
+    }
 
-        for _ in 0..NODE_COUNT {
-            nodes.push(Node::new());
-        }
+    #[test]
+    fn test_network_with_timeout() {
+        static MSG_COUNT: usize  = NETWORK_MSG_COUNT;
+        static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
 
-        let listening_addrs = nodes.iter()
-                              .map(|n|iotry!(n.listener.local_addr()))
-                              .collect::<Vec<_>>();
-
-        let mut join_handles = Vec::<JoinHandle<()>>::new();
-
-        let mut ni: usize = 0;
-        for mut node in nodes {
-            let mut addrs = Vec::<SocketAddr>::new();
-
-            for ai in 0..listening_addrs.len() {
-                if ai == ni { continue }
-                addrs.push(listening_addrs[ai].clone());
+        fn timeout_exchange(socket: &mut UtpSocket) {
+            socket.set_read_timeout(Some(50));
+            let mut recv_cnt = 0;
+            let mut send_cnt = 0;
+            loop {
+                if send_cnt < MSG_COUNT {
+                    match socket.send_to(&TX_BUF) {
+                        Ok(cnt) => {
+                            assert_eq!(cnt, TX_BUF.len());
+                            send_cnt += 1;
+                        },
+                        Err(ref e) if e.kind() == ErrorKind::TimedOut => {
+                        },
+                        Err(e) => {
+                            panic!("{:?}", e);
+                        }
+                    }
+                }
+                if recv_cnt < MSG_COUNT {
+                    let mut buf = [0; 10];
+                    match socket.recv_from(&mut buf) {
+                        Ok((cnt, _)) => {
+                            // TODO: We should never receive message of size zero
+                            // in this test.
+                            if cnt == 0 { continue; }
+                            assert_eq!(cnt, TX_BUF.len());
+                            assert_eq!(buf, TX_BUF);
+                            recv_cnt += 1;
+                        },
+                        Err(ref e) if e.kind() == ErrorKind::TimedOut => {
+                        },
+                        Err(ref e) if e.kind() == ErrorKind::NotConnected && send_cnt == MSG_COUNT=> {
+                            break;
+                        },
+                        Err(e) => {
+                            panic!("{:?} recv_cnt={} send_cnt={}", e, recv_cnt, send_cnt);
+                        }
+                    }
+                }
+                if send_cnt == MSG_COUNT && recv_cnt == MSG_COUNT {
+                    break;
+                }
             }
-
-            join_handles.push(spawn(move || { node.run(addrs); }));
-
-            ni += 1;
         }
 
-        for handle in join_handles {
-            iotry!(handle.join());
-        }
+        test_network(timeout_exchange);
     }
 
     // Test data exchange
