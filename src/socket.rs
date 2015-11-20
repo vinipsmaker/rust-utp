@@ -484,10 +484,9 @@ impl UtpSocket {
             }
 
             loop {
-                // We either received a confirmation for a Fin packet we
-                // sent or max_retransmission_retries has been reached.
+                // A closed socket with no pending data can only "read" 0 new bytes.
                 if self.state == SocketState::Closed {
-                    return Err(Error::from(SocketError::ConnectionClosed));
+                    return Ok((0, self.connected_to));
                 }
 
                 let user_read_timeout = self.user_read_timeout;
