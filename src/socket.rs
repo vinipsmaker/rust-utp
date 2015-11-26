@@ -2885,12 +2885,15 @@ mod test {
                     let mut buf = [0; 10];
                     match socket.recv_from(&mut buf) {
                         Ok((cnt, _)) => {
-                            // TODO: We should never receive message of size zero
-                            // in this test.
-                            if cnt == 0 { continue; }
-                            assert_eq!(cnt, TX_BUF.len());
-                            assert_eq!(buf, TX_BUF);
                             recv_cnt += 1;
+                            if cnt == 0 {
+                                // Zero size msg will be returned if the socket is in Closed state
+                                println!("received a message size of zero");
+                                continue
+                            } else {
+                                assert_eq!(cnt, TX_BUF.len());
+                                assert_eq!(buf, TX_BUF);
+                            }
                         },
                         Err(ref e) if e.kind() == ErrorKind::TimedOut => {
                         },
