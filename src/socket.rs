@@ -454,15 +454,14 @@ impl UtpSocket {
 
         // Send FIN
         try!(self.socket.send_to(&packet.to_bytes()[..], self.connected_to));
-//          println!("closing connection from {:?} to {:?}",
-//                   self.local_addr(), self.connected_to);
         debug!("sent {:?}", packet);
         self.state = SocketState::FinSent;
 
         // Receive JAKE
         let mut buf = [0; BUF_SIZE];
         while self.state != SocketState::Closed {
-            try!(self.recv(&mut buf, false));
+            let user_read_timeout = self.user_read_timeout;
+            try!(self.recv(&mut buf, user_read_timeout != 0));
         }
 
         Ok(())
@@ -532,11 +531,11 @@ impl UtpSocket {
         loop {
             // Abort loop if the current try exceeds the maximum number of retransmission retries.
             if retries >= self.max_retransmission_retries {
-                println!("exceeds max_retransmission_retries : {} ; current connect state is : {:?}",
-                         self.max_retransmission_retries, self.state);
+                debug!("exceeds max_retransmission_retries : {} ; current connect state is : {:?}",
+                       self.max_retransmission_retries, self.state);
                 self.state = SocketState::Closed;
-                println!("socket marked as closed from {:?} to {:?}",
-                         self.local_addr(), self.connected_to);
+                debug!("socket marked as closed from {:?} to {:?}",
+                       self.local_addr(), self.connected_to);
                 return Err(Error::from(SocketError::ConnectionTimedOut));
             }
 
@@ -779,7 +778,8 @@ impl UtpSocket {
         let mut buf = [0u8; BUF_SIZE];
         while !self.send_window.is_empty() {
             debug!("packets in send window: {}", self.send_window.len());
-            try!(self.recv(&mut buf, false));
+            let user_read_timeout = self.user_read_timeout;
+            try!(self.recv(&mut buf, user_read_timeout != 0));
         }
 
         Ok(())
@@ -811,7 +811,8 @@ impl UtpSocket {
             debug!("self.duplicate_ack_count: {}", self.duplicate_ack_count);
             debug!("now_microseconds() - now = {}", now_microseconds() - now);
             let mut buf = [0; BUF_SIZE];
-            try!(self.recv(&mut buf, false));
+            let user_read_timeout = self.user_read_timeout;
+            try!(self.recv(&mut buf, user_read_timeout != 0));
         }
         debug!("out: now_microseconds() - now = {}", now_microseconds() - now);
 
@@ -1069,8 +1070,8 @@ impl UtpSocket {
                     }
                 }
 
-                // // Give up, the remote peer might not care about our missing packets
-                //self.state = SocketState::Closed;
+                // Give up, the remote peer might not care about our missing packets
+                self.state = SocketState::Closed;
                 Ok(Some(reply))
             }
             (SocketState::FinSent, PacketType::State) => {
