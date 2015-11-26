@@ -460,7 +460,8 @@ impl UtpSocket {
         // Receive JAKE
         let mut buf = [0; BUF_SIZE];
         while self.state != SocketState::Closed {
-            try!(self.recv(&mut buf, false));
+            let user_read_timeout = self.user_read_timeout;
+            try!(self.recv(&mut buf, user_read_timeout != 0));
         }
 
         Ok(())
@@ -530,7 +531,11 @@ impl UtpSocket {
         loop {
             // Abort loop if the current try exceeds the maximum number of retransmission retries.
             if retries >= self.max_retransmission_retries {
+                debug!("exceeds max_retransmission_retries : {} ; current connect state is : {:?}",
+                       self.max_retransmission_retries, self.state);
                 self.state = SocketState::Closed;
+                debug!("socket marked as closed from {:?} to {:?}",
+                       self.local_addr(), self.connected_to);
                 return Err(Error::from(SocketError::ConnectionTimedOut));
             }
 
@@ -773,7 +778,8 @@ impl UtpSocket {
         let mut buf = [0u8; BUF_SIZE];
         while !self.send_window.is_empty() {
             debug!("packets in send window: {}", self.send_window.len());
-            try!(self.recv(&mut buf, false));
+            let user_read_timeout = self.user_read_timeout;
+            try!(self.recv(&mut buf, user_read_timeout != 0));
         }
 
         Ok(())
@@ -805,7 +811,8 @@ impl UtpSocket {
             debug!("self.duplicate_ack_count: {}", self.duplicate_ack_count);
             debug!("now_microseconds() - now = {}", now_microseconds() - now);
             let mut buf = [0; BUF_SIZE];
-            try!(self.recv(&mut buf, false));
+            let user_read_timeout = self.user_read_timeout;
+            try!(self.recv(&mut buf, user_read_timeout != 0));
         }
         debug!("out: now_microseconds() - now = {}", now_microseconds() - now);
 
@@ -1389,6 +1396,10 @@ mod test {
 
     macro_rules! iotry {
         ($e:expr) => (match $e { Ok(e) => e, Err(e) => panic!("{:?}", e) })
+    }
+
+    macro_rules! mutetry {
+        ($e:expr) => (match $e { Ok(e) => e, Err(e) => println!("{:?}", e) })
     }
 
     fn next_test_port() -> u16 {
@@ -2725,6 +2736,182 @@ mod test {
             x => panic!("Expected Err(TimedOut), got {:?}", x),
         }
         assert!(child.join().is_ok());
+    }
+
+    const NETWORK_NODE_COUNT: usize = 40;
+    const NETWORK_MSG_COUNT: usize = 5;
+
+    fn test_network(exchange: fn(&mut UtpSocket) -> ()) {
+        use std::net::SocketAddr;
+        use std::thread::{JoinHandle, spawn};
+
+        const NODE_COUNT: usize = NETWORK_NODE_COUNT;
+
+        struct Node {
+            listener: UtpListener,
+        }
+
+        impl Node {
+            fn new() -> Node {
+                Node {
+                    listener: iotry!(UtpListener::bind("127.0.0.1:0")),
+                }
+            }
+
+            fn run(&mut self, exchange: fn(&mut UtpSocket) -> (), peer_addrs: Vec<SocketAddr>) {
+                let connect_join_handle = spawn(move || {
+                    let mut send_jhs = Vec::<JoinHandle<()>>::new();
+
+                    for peer_addr in peer_addrs {
+                        let mut socket = iotry!(UtpSocket::connect(peer_addr));
+                        send_jhs.push(spawn(move || { exchange(&mut socket) }));
+                    }
+
+                    for jh in send_jhs {
+                        mutetry!(jh.join());
+                    }
+                });
+
+                let mut recv_jhs = Vec::<JoinHandle<()>>::new();
+
+                for _ in 0..NODE_COUNT-1 {
+                    let mut socket = iotry!(self.listener.accept()).0;
+                    recv_jhs.push(spawn(move || { exchange(&mut socket) }));
+                }
+
+                for jh in recv_jhs {
+                    mutetry!(jh.join());
+                }
+
+                mutetry!(connect_join_handle.join());
+            }
+        }
+
+        let mut nodes = Vec::<Node>::new();
+
+        for _ in 0..NODE_COUNT {
+            nodes.push(Node::new());
+        }
+
+        let listening_addrs = nodes.iter()
+                              .map(|n|iotry!(n.listener.local_addr()))
+                              .collect::<Vec<_>>();
+
+        let mut join_handles = Vec::<JoinHandle<()>>::new();
+
+        let mut ni: usize = 0;
+        for mut node in nodes {
+            let mut addrs = Vec::<SocketAddr>::new();
+
+            for ai in 0..listening_addrs.len() {
+                if ai == ni { continue }
+                addrs.push(listening_addrs[ai].clone());
+            }
+
+            join_handles.push(spawn(move || { node.run(exchange, addrs); }));
+
+            ni += 1;
+        }
+
+        for handle in join_handles {
+            mutetry!(handle.join());
+        }
+    }
+
+    #[test]
+    fn test_network_no_timeout() {
+        static MSG_COUNT: usize  = NETWORK_MSG_COUNT;
+        static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
+
+        fn sequential_exchange(socket: &mut UtpSocket) {
+            let mut i = 0;
+            while i < MSG_COUNT {
+                assert_eq!(iotry!(socket.send_to(&TX_BUF)), TX_BUF.len());
+                let mut buf = [0; 10];
+                match socket.recv_from(&mut buf) {
+                    Ok((cnt, _)) => {
+                        if socket.state == SocketState::Connected {
+                            assert_eq!(cnt, 10);
+                            assert_eq!(buf, TX_BUF);
+                        } else {
+                            println!("socket is in an invliad state of {:?} from {:?} to {:?}",
+                                     socket.state, socket.socket.local_addr(), socket.connected_to);
+                        }
+                    },
+                    Err(ref err) if err.kind() == ErrorKind::NotConnected && i == MSG_COUNT - 1 => {
+                        // This is OK as it can happen on a congested network.
+                        println!("connection not established due to a congested network");
+                        break;
+                    },
+                    Err(_err) => {
+                        println!("failed in sending from {:?} to {:?}",
+                                 socket.socket.local_addr(), socket.connected_to);
+                        // panic!("Recv error {:?}", err);
+                    }
+                }
+                i += 1;
+            }
+        }
+        for i in 0..100 {
+            println!("------ Testing Network iteration {}", i);
+            test_network(sequential_exchange);
+        }
+    }
+
+    #[test]
+    fn test_network_with_timeout() {
+        static MSG_COUNT: usize  = NETWORK_MSG_COUNT;
+        static TX_BUF: [u8; 10] = [0,1,2,3,4,5,6,7,8,9];
+
+        fn timeout_exchange(socket: &mut UtpSocket) {
+            socket.set_read_timeout(Some(50));
+            let mut recv_cnt = 0;
+            let mut send_cnt = 0;
+            loop {
+                if send_cnt < MSG_COUNT {
+                    match socket.send_to(&TX_BUF) {
+                        Ok(cnt) => {
+                            assert_eq!(cnt, TX_BUF.len());
+                            send_cnt += 1;
+                        },
+                        Err(ref e) if e.kind() == ErrorKind::TimedOut => {
+                        },
+                        Err(e) => {
+                            panic!("{:?}", e);
+                        }
+                    }
+                }
+                if recv_cnt < MSG_COUNT {
+                    let mut buf = [0; 10];
+                    match socket.recv_from(&mut buf) {
+                        Ok((cnt, _)) => {
+                            recv_cnt += 1;
+                            if cnt == 0 {
+                                // Zero size msg will be returned if the socket is in Closed state
+                                println!("received a message size of zero");
+                                continue
+                            } else {
+                                assert_eq!(cnt, TX_BUF.len());
+                                assert_eq!(buf, TX_BUF);
+                            }
+                        },
+                        Err(ref e) if e.kind() == ErrorKind::TimedOut => {
+                        },
+                        Err(ref e) if e.kind() == ErrorKind::NotConnected && send_cnt == MSG_COUNT=> {
+                            break;
+                        },
+                        Err(e) => {
+                            panic!("{:?} recv_cnt={} send_cnt={}", e, recv_cnt, send_cnt);
+                        }
+                    }
+                }
+                if send_cnt == MSG_COUNT && recv_cnt == MSG_COUNT {
+                    break;
+                }
+            }
+        }
+
+        test_network(timeout_exchange);
     }
 
     // Test data exchange
