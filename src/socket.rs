@@ -588,11 +588,17 @@ impl UtpSocket {
                         || ((now - self.last_congestion_update)
                             >= congestion_timeout) {
                             self.last_congestion_update = now;
-                            try!(self.handle_receive_timeout());
+                            if let Err(e) = self.handle_receive_timeout() {
+                                println!("Could m-maybe be `{:?}`", e);
+                                return Err(e);
+                            }
                             self.retries += 1;
                         }
                 },
-                Err(e) => return Err(e),
+                Err(e) => {
+                    println!("Could it be because {:?} or `{:?}`", e.kind(), e);
+                    return Err(e)
+                },
             };
 
             let elapsed = (SteadyTime::now() - now).num_milliseconds();
