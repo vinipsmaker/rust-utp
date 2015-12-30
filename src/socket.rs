@@ -542,7 +542,8 @@ impl UtpSocket {
 
     fn recv(&mut self, buf: &mut[u8], use_user_timeout: bool)
             -> Result<(usize, SocketAddr)> {
-        let mut b = [0; BUF_SIZE + HEADER_SIZE];
+        //let mut b = [0; BUF_SIZE + HEADER_SIZE];
+        let mut b = [0; BUF_SIZE * 4 + HEADER_SIZE];
         let now = SteadyTime::now();
         let (read, src);
         let user_timeout = if use_user_timeout {
