@@ -640,7 +640,13 @@ impl UtpSocket {
         debug!("received {:?}", packet);
 
         // Process packet, including sending a reply if necessary
-        if let Some(mut pkt) = try!(self.handle_packet(&packet, src)) {
+        if let Some(mut pkt) = match self.handle_packet(&packet, src) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("666: {:?}", e);
+                return Err(e)
+            },
+        } {
                 pkt.set_wnd_size(BUF_SIZE as u32);
                 try!(self.socket.send_to(&pkt.to_bytes()[..], src));
                 debug!("sent {:?}", pkt);
