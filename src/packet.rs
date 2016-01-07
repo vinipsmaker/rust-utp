@@ -1,6 +1,6 @@
 use std::mem::transmute;
 use std::fmt;
-use std::num::Int;
+use num::traits::PrimInt;
 use bit_iterator::BitIterator;
 
 pub const HEADER_SIZE: usize = 20;
@@ -9,7 +9,7 @@ macro_rules! u8_to_unsigned_be {
     ($src:ident, $start:expr, $end:expr, $t:ty) => ({
         let mut result: $t = 0;
         for i in (0usize .. $end - $start + 1).rev() {
-            result = result | $src[$start+i] as $t << i*8;
+            result = result | $src[$start+i] as $t << (i*8);
         }
         result
     })
@@ -17,11 +17,11 @@ macro_rules! u8_to_unsigned_be {
 
 #[derive(PartialEq,Eq,Debug)]
 pub enum PacketType {
-    Data  = 0,
-    Fin   = 1,
+    Data = 0,
+    Fin = 1,
     State = 2,
     Reset = 3,
-    Syn   = 4,
+    Syn = 4,
 }
 
 #[derive(PartialEq,Eq,Debug,Clone,Copy)]
@@ -45,9 +45,9 @@ impl Extension {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut data = vec!(self.data.len() as u8);
+        let mut data = vec![self.data.len() as u8];
         data.extend(self.data.iter().map(|&x| x));
-        return data;
+        data
     }
 
     pub fn iter(&self) -> BitIterator {
@@ -56,7 +56,6 @@ impl Extension {
 }
 
 #[derive(Clone,Copy)]
-#[packed]
 struct PacketHeader {
     type_ver: u8, // type: u4, ver: u4
     extension: u8,
@@ -86,11 +85,11 @@ impl PacketHeader {
     /// Return packet header as a slice of bytes.
     pub fn bytes(&self) -> &[u8] {
         let buf: &[u8; HEADER_SIZE] = unsafe { transmute(self) };
-        return &buf[..];
+        &buf[..]
     }
 
     pub fn len(&self) -> usize {
-        return HEADER_SIZE;
+        HEADER_SIZE
     }
 
     /// Read byte buffer and return corresponding packet header.
@@ -117,14 +116,14 @@ impl fmt::Debug for PacketHeader {
                 timestamp_difference_microseconds: {}, wnd_size: {}, \
                 seq_nr: {}, ack_nr: {})",
                 self.get_type(),
-                Int::from_be(self.get_version()),
-                Int::from_be(self.extension),
-                Int::from_be(self.connection_id),
-                Int::from_be(self.timestamp_microseconds),
-                Int::from_be(self.timestamp_difference_microseconds),
-                Int::from_be(self.wnd_size),
-                Int::from_be(self.seq_nr),
-                Int::from_be(self.ack_nr),
+                u8::from_be(self.get_version()),
+                u8::from_be(self.extension),
+                u16::from_be(self.connection_id),
+                u32::from_be(self.timestamp_microseconds),
+                u32::from_be(self.timestamp_difference_microseconds),
+                u32::from_be(self.wnd_size),
+                u16::from_be(self.seq_nr),
+                u16::from_be(self.ack_nr),
         )
     }
 }
@@ -166,7 +165,7 @@ impl Packet {
 
     #[inline]
     pub fn seq_nr(&self) -> u16 {
-        Int::from_be(self.header.seq_nr)
+        u16::from_be(self.header.seq_nr)
     }
 
     #[inline]
@@ -176,7 +175,7 @@ impl Packet {
 
     #[inline]
     pub fn ack_nr(&self) -> u16 {
-        Int::from_be(self.header.ack_nr)
+        u16::from_be(self.header.ack_nr)
     }
 
     #[inline]
@@ -186,7 +185,7 @@ impl Packet {
 
     #[inline]
     pub fn connection_id(&self) -> u16 {
-        Int::from_be(self.header.connection_id)
+        u16::from_be(self.header.connection_id)
     }
 
     #[inline]
@@ -201,12 +200,12 @@ impl Packet {
 
     #[inline]
     pub fn wnd_size(&self) -> u32 {
-        Int::from_be(self.header.wnd_size)
+        u32::from_be(self.header.wnd_size)
     }
 
     #[inline]
     pub fn timestamp_microseconds(&self) -> u32 {
-        Int::from_be(self.header.timestamp_microseconds)
+        u32::from_be(self.header.timestamp_microseconds)
     }
 
     #[inline]
@@ -216,7 +215,7 @@ impl Packet {
 
     #[inline]
     pub fn timestamp_difference_microseconds(&self) -> u32 {
-        Int::from_be(self.header.timestamp_difference_microseconds)
+        u32::from_be(self.header.timestamp_difference_microseconds)
     }
 
     #[inline]
@@ -237,7 +236,7 @@ impl Packet {
             None => {
                 self.header.extension = 0;
                 self.extensions = Vec::new();
-            },
+            }
             Some(bv) => {
                 // The length of the SACK extension is expressed in bytes, which
                 // must be a multiple of 4 and at least 4.
@@ -269,7 +268,7 @@ impl Packet {
         }
 
         buf.extend(self.payload.clone());
-        return buf;
+        buf
     }
 
     pub fn len(&self) -> usize {
@@ -295,7 +294,8 @@ impl Packet {
             let extension_start = idx + 2;
             let payload_start = extension_start + len;
 
-            if kind == ExtensionType::SelectiveAck as u8 { // or more generally, a known kind
+            if kind == ExtensionType::SelectiveAck as u8 {
+                // or more generally, a known kind
                 let extension = Extension {
                     ty: ExtensionType::SelectiveAck,
                     data: buf[extension_start..payload_start].to_vec(),
@@ -307,7 +307,7 @@ impl Packet {
             idx += payload_start;
         }
 
-        let mut payload;
+        let payload;
         if idx < buf.len() {
             payload = buf[idx..].to_vec();
         } else {
@@ -353,20 +353,21 @@ mod test {
     use super::PacketType::{State, Data};
     use super::ExtensionType;
     use super::HEADER_SIZE;
-    use std::num::Int;
+    use num::traits::PrimInt;
 
     #[test]
     fn test_packet_decode() {
-        let buf = [0x21, 0x00, 0x41, 0xa8, 0x99, 0x2f, 0xd0, 0x2a, 0x9f, 0x4a,
-                   0x26, 0x21, 0x00, 0x10, 0x00, 0x00, 0x3a, 0xf2, 0x6c, 0x79];
+        let buf = [0x21, 0x00, 0x41, 0xa8, 0x99, 0x2f, 0xd0, 0x2a, 0x9f, 0x4a, 0x26, 0x21, 0x00,
+                   0x10, 0x00, 0x00, 0x3a, 0xf2, 0x6c, 0x79];
         let pkt = Packet::decode(&buf);
         assert_eq!(pkt.header.get_version(), 1);
         assert_eq!(pkt.header.get_type(), State);
         assert_eq!(pkt.header.extension, 0);
         assert_eq!(pkt.connection_id(), 16808);
-        assert_eq!(Int::from_be(pkt.header.timestamp_microseconds), 2570047530);
-        assert_eq!(Int::from_be(pkt.header.timestamp_difference_microseconds), 2672436769);
-        assert_eq!(Int::from_be(pkt.header.wnd_size), 2u32.pow(20));
+        assert_eq!(u32::from_be(pkt.header.timestamp_microseconds), 2570047530);
+        assert_eq!(u32::from_be(pkt.header.timestamp_difference_microseconds),
+                   2672436769);
+        assert_eq!(u32::from_be(pkt.header.wnd_size), 2u32.pow(20));
         assert_eq!(pkt.seq_nr(), 15090);
         assert_eq!(pkt.ack_nr(), 27769);
         assert_eq!(pkt.len(), buf.len());
@@ -375,48 +376,48 @@ mod test {
 
     #[test]
     fn test_decode_packet_with_extension() {
-        let buf = [0x21, 0x01, 0x41, 0xa7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                   0x00, 0x00, 0x00, 0x00, 0x05, 0xdc, 0xab, 0x53, 0x3a, 0xf5,
-                   0x00, 0x04, 0x00, 0x00, 0x00, 0x00];
+        let buf = [0x21, 0x01, 0x41, 0xa7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                   0x00, 0x05, 0xdc, 0xab, 0x53, 0x3a, 0xf5, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00];
         let packet = Packet::decode(&buf);
         assert_eq!(packet.header.get_version(), 1);
         assert_eq!(packet.header.get_type(), State);
         assert_eq!(packet.header.extension, 1);
         assert_eq!(packet.connection_id(), 16807);
-        assert_eq!(Int::from_be(packet.header.timestamp_microseconds), 0);
-        assert_eq!(Int::from_be(packet.header.timestamp_difference_microseconds), 0);
-        assert_eq!(Int::from_be(packet.header.wnd_size), 1500);
+        assert_eq!(u32::from_be(packet.header.timestamp_microseconds), 0);
+        assert_eq!(u32::from_be(packet.header.timestamp_difference_microseconds),
+                   0);
+        assert_eq!(u32::from_be(packet.header.wnd_size), 1500);
         assert_eq!(packet.seq_nr(), 43859);
         assert_eq!(packet.ack_nr(), 15093);
         assert_eq!(packet.len(), buf.len());
         assert!(packet.payload.is_empty());
         assert!(packet.extensions.len() == 1);
         assert!(packet.extensions[0].ty == ExtensionType::SelectiveAck);
-        assert!(packet.extensions[0].data == vec!(0,0,0,0));
+        assert!(packet.extensions[0].data == vec![0, 0, 0, 0]);
         assert!(packet.extensions[0].len() == 1 + packet.extensions[0].data.len());
         assert!(packet.extensions[0].len() == 5);
     }
 
     #[test]
     fn test_decode_packet_with_unknown_extensions() {
-        let buf = [0x21, 0x01, 0x41, 0xa7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                   0x00, 0x00, 0x00, 0x00, 0x05, 0xdc, 0xab, 0x53, 0x3a, 0xf5,
-                   0xff, 0x04, 0x00, 0x00, 0x00, 0x00, // Imaginary extension
-                   0x00, 0x04, 0x00, 0x00, 0x00, 0x00];
+        let buf = [0x21, 0x01, 0x41, 0xa7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                   0x00, 0x05, 0xdc, 0xab, 0x53, 0x3a, 0xf5, 0xff, 0x04, 0x00, 0x00, 0x00,
+                   0x00 /* Imaginary extension */, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00];
         let packet = Packet::decode(&buf);
         assert_eq!(packet.header.get_version(), 1);
         assert_eq!(packet.header.get_type(), State);
         assert_eq!(packet.header.extension, 1);
         assert_eq!(packet.connection_id(), 16807);
-        assert_eq!(Int::from_be(packet.header.timestamp_microseconds), 0);
-        assert_eq!(Int::from_be(packet.header.timestamp_difference_microseconds), 0);
-        assert_eq!(Int::from_be(packet.header.wnd_size), 1500);
+        assert_eq!(u32::from_be(packet.header.timestamp_microseconds), 0);
+        assert_eq!(u32::from_be(packet.header.timestamp_difference_microseconds),
+                   0);
+        assert_eq!(u32::from_be(packet.header.wnd_size), 1500);
         assert_eq!(packet.seq_nr(), 43859);
         assert_eq!(packet.ack_nr(), 15093);
         assert!(packet.payload.is_empty());
         assert!(packet.extensions.len() == 1);
         assert!(packet.extensions[0].ty == ExtensionType::SelectiveAck);
-        assert!(packet.extensions[0].data == vec!(0,0,0,0));
+        assert!(packet.extensions[0].data == vec![0, 0, 0, 0]);
         assert!(packet.extensions[0].len() == 1 + packet.extensions[0].data.len());
         assert!(packet.extensions[0].len() == 5);
     }
@@ -437,10 +438,8 @@ mod test {
         pkt.header.wnd_size = window_size.to_be();
         pkt.payload = payload.clone();
         let header = pkt.header;
-        let buf = [0x01, 0x00, 0x41, 0xa8, 0x00, 0xe9, 0x03, 0x89,
-                   0x65, 0xbf, 0x5d, 0xba, 0x00, 0x10, 0x00, 0x00,
-                   0x3a, 0xf2, 0x42, 0xc8, 0x48, 0x65, 0x6c, 0x6c,
-                   0x6f, 0x0a];
+        let buf = [0x01, 0x00, 0x41, 0xa8, 0x00, 0xe9, 0x03, 0x89, 0x65, 0xbf, 0x5d, 0xba, 0x00,
+                   0x10, 0x00, 0x00, 0x3a, 0xf2, 0x42, 0xc8, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x0a];
 
         assert_eq!(pkt.len(), buf.len());
         assert_eq!(pkt.len(), HEADER_SIZE + payload.len());
@@ -448,21 +447,20 @@ mod test {
         assert_eq!(header.get_version(), 1);
         assert_eq!(header.get_type(), Data);
         assert_eq!(header.extension, 0);
-        assert_eq!(Int::from_be(header.connection_id), connection_id);
-        assert_eq!(Int::from_be(header.seq_nr), seq_nr);
-        assert_eq!(Int::from_be(header.ack_nr), ack_nr);
-        assert_eq!(Int::from_be(header.wnd_size), window_size);
-        assert_eq!(Int::from_be(header.timestamp_microseconds), timestamp);
-        assert_eq!(Int::from_be(header.timestamp_difference_microseconds), timestamp_diff);
+        assert_eq!(u16::from_be(header.connection_id), connection_id);
+        assert_eq!(u16::from_be(header.seq_nr), seq_nr);
+        assert_eq!(u16::from_be(header.ack_nr), ack_nr);
+        assert_eq!(u32::from_be(header.wnd_size), window_size);
+        assert_eq!(u32::from_be(header.timestamp_microseconds), timestamp);
+        assert_eq!(u32::from_be(header.timestamp_difference_microseconds),
+                   timestamp_diff);
         assert_eq!(pkt.bytes(), buf.to_vec());
     }
 
     #[test]
     fn test_reversible() {
-        let buf = [0x01, 0x00, 0x41, 0xa8, 0x00, 0xe9, 0x03, 0x89,
-                   0x65, 0xbf, 0x5d, 0xba, 0x00, 0x10, 0x00, 0x00,
-                   0x3a, 0xf2, 0x42, 0xc8, 0x48, 0x65, 0x6c, 0x6c,
-                   0x6f, 0x0a];
+        let buf = [0x01, 0x00, 0x41, 0xa8, 0x00, 0xe9, 0x03, 0x89, 0x65, 0xbf, 0x5d, 0xba, 0x00,
+                   0x10, 0x00, 0x00, 0x3a, 0xf2, 0x42, 0xc8, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x0a];
         assert_eq!(&Packet::decode(&buf).bytes()[..], &buf[..]);
     }
 

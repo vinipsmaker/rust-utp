@@ -49,7 +49,8 @@
 extern crate rand;
 extern crate time;
 extern crate num;
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 
 // Public API
 pub use socket::UtpSocket;

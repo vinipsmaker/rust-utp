@@ -3,12 +3,16 @@
 pub struct BitIterator<'a> {
     object: &'a Vec<u8>,
     current_byte: usize,
-    current_bit: usize
+    current_bit: usize,
 }
 
 impl<'a> BitIterator<'a> {
     pub fn new(obj: &'a Vec<u8>) -> BitIterator {
-        BitIterator { object: obj, current_byte: 0, current_bit: 0 }
+        BitIterator {
+            object: obj,
+            current_byte: 0,
+            current_bit: 0,
+        }
     }
 }
 
@@ -25,17 +29,17 @@ impl<'a> Iterator for BitIterator<'a> {
         self.current_bit = (self.current_bit + 1) % U8BITS;
 
         if self.current_byte == self.object.len() {
-            return None;
+            None
         } else {
-            return Some(result);
+            Some(result)
         }
     }
 }
 
 #[test]
 fn test_iterator() {
-    let bytes = vec!(0xCA, 0xFE);
-    let expected_bits = vec!(0,1,0,1, 0,0,1,1, 0,1,1,1, 1,1,1,1);
+    let bytes = vec![0xCA, 0xFE];
+    let expected_bits = vec![0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1];
     let mut i = 0;
 
     for bit in BitIterator::new(&bytes) {
