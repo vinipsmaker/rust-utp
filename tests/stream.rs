@@ -19,12 +19,16 @@ fn next_test_ip4<'a>() -> (&'a str, u16) {
     ("127.0.0.1", next_test_port())
 }
 
+fn next_test_ip6<'a>() -> (&'a str, u16) {
+    ("::1", next_test_port())
+}
+
 #[test]
 fn test_stream_open_and_close() {
     let server_addr = next_test_ip4();
     let mut server = iotry!(UtpStream::bind(server_addr));
 
-    thread::spawn(move || {
+    let child = thread::spawn(move || {
         let mut client = iotry!(UtpStream::connect(server_addr));
         iotry!(client.close());
         drop(client);
@@ -33,6 +37,24 @@ fn test_stream_open_and_close() {
     let mut received = vec!();
     iotry!(server.read_to_end(&mut received));
     iotry!(server.close());
+    assert!(child.join().is_ok());
+}
+
+#[test]
+fn test_stream_open_and_close_ipv6() {
+    let server_addr = next_test_ip6();
+    let mut server = iotry!(UtpStream::bind(server_addr));
+
+    let child = thread::spawn(move || {
+        let mut client = iotry!(UtpStream::connect(server_addr));
+        iotry!(client.close());
+        drop(client);
+    });
+
+    let mut received = vec!();
+    iotry!(server.read_to_end(&mut received));
+    iotry!(server.close());
+    assert!(child.join().is_ok());
 }
 
 #[test]
@@ -46,7 +68,7 @@ fn test_stream_small_data() {
     let server_addr = next_test_ip4();
     let mut server = iotry!(UtpStream::bind(server_addr));
 
-    thread::spawn(move || {
+    let child = thread::spawn(move || {
         let mut client = iotry!(UtpStream::connect(server_addr));
         iotry!(client.write(&d[..]));
         iotry!(client.close());
@@ -57,6 +79,7 @@ fn test_stream_small_data() {
     assert!(!received.is_empty());
     assert_eq!(received.len(), data.len());
     assert_eq!(received, data);
+    assert!(child.join().is_ok());
 }
 
 #[test]
@@ -70,7 +93,7 @@ fn test_stream_large_data() {
     let server_addr = next_test_ip4();
     let mut server = iotry!(UtpStream::bind(server_addr));
 
-    thread::spawn(move || {
+    let child = thread::spawn(move || {
         let mut client = iotry!(UtpStream::connect(server_addr));
         iotry!(client.write(&d[..]));
         iotry!(client.close());
@@ -81,6 +104,7 @@ fn test_stream_large_data() {
     assert!(!received.is_empty());
     assert_eq!(received.len(), data.len());
     assert_eq!(received, data);
+    assert!(child.join().is_ok());
 }
 
 #[test]
@@ -93,7 +117,7 @@ fn test_stream_successive_reads() {
     let server_addr = next_test_ip4();
     let mut server = iotry!(UtpStream::bind(server_addr));
 
-    thread::spawn(move || {
+    let child = thread::spawn(move || {
         let mut client = iotry!(UtpStream::connect(server_addr));
         iotry!(client.write(&d[..]));
         iotry!(client.close());
@@ -105,8 +129,18 @@ fn test_stream_successive_reads() {
     assert_eq!(received.len(), data.len());
     assert_eq!(received, data);
 
-    match server.read(&mut received) {
-        Ok(0) => (),
-        e => panic!("should have returned Ok(0), got {:?}", e),
-    };
+    assert_eq!(server.read(&mut received).unwrap(), 0);
+    assert!(child.join().is_ok());
+}
+
+#[test]
+fn test_local_addr() {
+    use std::net::ToSocketAddrs;
+
+    let addr = next_test_ip4();
+    let addr = addr.to_socket_addrs().unwrap().next().unwrap();
+    let stream = UtpStream::bind(addr).unwrap();
+
+    assert!(stream.local_addr().is_ok());
+    assert_eq!(stream.local_addr().unwrap(), addr);
 }
